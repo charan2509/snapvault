@@ -1,10 +1,15 @@
 import asyncio
-import json
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent.parent / ".env")
 import random
 import string
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import psycopg2
+from psycopg2 import pool
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,38 +17,61 @@ from pydantic import BaseModel
 
 EXPIRY_HOURS = 2
 CLEANUP_INTERVAL_SECONDS = 60  # run cleanup every minute
-DB_FILE = Path(__file__).parent / "clipboard_db.json"
 
+# PostgreSQL connection pool
+db_pool = None
 
-# ─── DB helpers ─────────────────────────────────────────────────────────────
+# Database Credentials from .env
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
 
-def load_db() -> dict:
-    if not DB_FILE.exists():
-        DB_FILE.write_text(json.dumps({}), encoding="utf-8")
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+def init_db():
+    global db_pool
+    db_pool = psycopg2.pool.ThreadedConnectionPool(
+        1, 10,
+        host=DB_HOST,
+        port=DB_PORT,
+        database=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD
+    )
+    
+    # Create table if it doesn't exist
+    conn = db_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS clipboard (
+                    code VARCHAR(4) PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Error initializing database: {e}")
+    finally:
+        db_pool.putconn(conn)
 
-
-def save_db(data: dict) -> None:
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-def expires_at_from(created_at_str: str) -> datetime:
-    created = datetime.fromisoformat(created_at_str)
-    return created + timedelta(hours=EXPIRY_HOURS)
-
-
-def purge_expired(db: dict) -> tuple[dict, int]:
-    """Remove entries older than EXPIRY_HOURS. Returns (cleaned_db, removed_count)."""
-    now = datetime.now(timezone.utc)
-    to_delete = [
-        code for code, entry in db.items()
-        if expires_at_from(entry["created_at"]) <= now
-    ]
-    for code in to_delete:
-        del db[code]
-    return db, len(to_delete)
+def purge_expired():
+    """Remove entries older than EXPIRY_HOURS."""
+    conn = db_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM clipboard WHERE created_at <= NOW() - INTERVAL '%s hours';", (EXPIRY_HOURS,))
+            conn.commit()
+            removed = cur.rowcount
+            return removed
+    except Exception as e:
+        conn.rollback()
+        print(f"[Cleanup] Error: {e}")
+        return 0
+    finally:
+        db_pool.putconn(conn)
 
 
 # ─── Background cleanup task ─────────────────────────────────────────────────
@@ -52,10 +80,8 @@ async def cleanup_loop():
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
         try:
-            db = load_db()
-            db, removed = purge_expired(db)
-            if removed:
-                save_db(db)
+            removed = purge_expired()
+            if removed > 0:
                 print(f"[Cleanup] Removed {removed} expired entry/entries.")
         except Exception as exc:
             print(f"[Cleanup] Error: {exc}")
@@ -63,6 +89,7 @@ async def cleanup_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    init_db()
     task = asyncio.create_task(cleanup_loop())
     yield
     task.cancel()
@@ -70,6 +97,8 @@ async def lifespan(app: FastAPI):
         await task
     except asyncio.CancelledError:
         pass
+    if db_pool:
+        db_pool.closeall()
 
 
 # ─── App ─────────────────────────────────────────────────────────────────────
@@ -85,12 +114,13 @@ app.add_middleware(
 )
 
 
-def generate_unique_code() -> str:
-    db = load_db()
+def generate_unique_code(conn) -> str:
     while True:
         code = "".join(random.choices(string.ascii_uppercase, k=4))
-        if code not in db:
-            return code
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM clipboard WHERE code = %s;", (code,))
+            if cur.fetchone() is None:
+                return code
 
 
 # ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -119,19 +149,30 @@ def paste_content(req: PasteRequest):
     if not req.content.strip():
         raise HTTPException(status_code=400, detail="Content cannot be empty.")
 
-    # Purge expired entries on every write
-    db = load_db()
-    db, _ = purge_expired(db)
+    # Purge expired entries
+    purge_expired()
 
-    code = generate_unique_code()
-    now = datetime.now(timezone.utc)
-    now_str = now.isoformat()
-    expires = now + timedelta(hours=EXPIRY_HOURS)
-
-    db[code] = {"content": req.content, "created_at": now_str}
-    save_db(db)
-
-    return PasteResponse(code=code, created_at=now_str, expires_at=expires.isoformat())
+    conn = db_pool.getconn()
+    try:
+        code = generate_unique_code(conn)
+        
+        now = datetime.now(timezone.utc)
+        
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO clipboard (code, content, created_at) VALUES (%s, %s, %s) RETURNING created_at;",
+                (code, req.content, now)
+            )
+            created_at_dt = cur.fetchone()[0]
+            conn.commit()
+            
+        expires = created_at_dt + timedelta(hours=EXPIRY_HOURS)
+        return PasteResponse(code=code, created_at=created_at_dt.isoformat(), expires_at=expires.isoformat())
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db_pool.putconn(conn)
 
 
 @app.get("/api/retrieve/{code}", response_model=RetrieveResponse)
@@ -140,25 +181,39 @@ def retrieve_content(code: str):
     if len(code) != 4 or not code.isalpha():
         raise HTTPException(status_code=400, detail="Code must be exactly 4 uppercase letters.")
 
-    db = load_db()
+    # Purge expired
+    purge_expired()
 
-    # Purge expired on every read too
-    db, removed = purge_expired(db)
-    if removed:
-        save_db(db)
-
-    entry = db.get(code)
-    if not entry:
-        raise HTTPException(status_code=404, detail="Code not found. It may have expired or is invalid.")
-
-    expires = expires_at_from(entry["created_at"])
-
-    return RetrieveResponse(
-        code=code,
-        content=entry["content"],
-        created_at=entry["created_at"],
-        expires_at=expires.isoformat(),
-    )
+    conn = db_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT content, created_at FROM clipboard WHERE code = %s;", (code,))
+            row = cur.fetchone()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Code not found. It may have expired or is invalid.")
+                
+            content, created_at_dt = row
+            
+            # Check expiry (in case purge hasn't caught it yet)
+            now = datetime.now(timezone.utc)
+            if created_at_dt + timedelta(hours=EXPIRY_HOURS) <= now:
+                raise HTTPException(status_code=404, detail="Code not found. It may have expired or is invalid.")
+                
+            expires = created_at_dt + timedelta(hours=EXPIRY_HOURS)
+            
+            return RetrieveResponse(
+                code=code,
+                content=content,
+                created_at=created_at_dt.isoformat(),
+                expires_at=expires.isoformat(),
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db_pool.putconn(conn)
 
 
 @app.get("/health")

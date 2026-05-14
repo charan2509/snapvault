@@ -563,8 +563,20 @@ html, body, #root {
 
 /* ─── Responsive ───────────────────────────────────────── */
 @media (max-width: 640px) {
-  .app-container { padding: 28px 16px; }
-  .view-panel { padding: 24px 20px; }
-  .code-letter, .code-input { width: 54px; height: 60px; font-size: 26px; }
-  .action-card { padding: 18px 20px; }
+  .app-root { min-height: 100dvh; }
+  .app-container { padding: 20px 16px; }
+  .logo-text { font-size: 24px; }
+  .home-title { font-size: 28px; }
+  .home-subtitle { font-size: 14px; max-width: 100%; }
+  .action-card { padding: 16px; gap: 12px; }
+  .card-icon-wrap { width: 44px; height: 44px; }
+  .card-body h2 { font-size: 18px; }
+  .card-body p { font-size: 12px; }
+  .view-panel { padding: 20px 16px; }
+  .view-title { font-size: 20px; }
+  .code-letter, .code-input { width: 48px; height: 56px; font-size: 24px; }
+  .code-input-row, .code-display { gap: 8px; }
+  .result-actions, .success-actions { flex-direction: column; width: 100%; gap: 8px; }
+  .result-actions button, .success-actions button { width: 100%; justify-content: center; }
+  .retrieve-form .primary-btn { max-width: 100%; }
 }

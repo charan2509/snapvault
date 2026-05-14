@@ -103,7 +103,7 @@ export default function RetrieveView({ onBack }: Props) {
               onChange={(e) => handleDigitChange(i, e.target.value)}
               onKeyDown={(e) => handleKeyDown(i, e)}
               onPaste={handlePaste}
-              disabled={status === "loading"}
+              disabled={status === "loading" || status === "success"}
               placeholder="·"
               autoFocus={i === 0}
             />

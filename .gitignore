@@ -148,14 +148,18 @@ activemq-data/
 *.sage.py
 
 # Environments
-# .env
-# .envrc
-# .venv
-# env/
-# venv/
-# ENV/
-# env.bak/
-# venv.bak/
+.env
+.envrc
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+# Frontend env files (contains VITE_API_URL for production)
+frontend/.env.local
+frontend/.env.production
+frontend/.env*.local
 
 # Spyder project settings
 .spyderproject

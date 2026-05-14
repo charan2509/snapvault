@@ -74,7 +74,7 @@ function App() {
         <footer className="app-footer">
           <p>Codes auto-expire in 2 hrs · No account needed · Just share the code</p>
           <p className="footer-credit">
-            Made by <strong>Charan</strong> ·{" "}
+            Made by <strong>Charan </strong> ·{" "}
             <a href="mailto:haricharan7701@gmail.com" className="footer-email">haricharan7701@gmail.com</a>
           </p>
         </footer>
